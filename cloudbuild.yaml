@@ -1,0 +1,122 @@
+# Cloud Build configuration for Smart AAC API
+# This file defines the build and deployment pipeline for Google Cloud Build
+
+steps:
+  # Step 1: Install dependencies and run tests
+  - name: 'node:18-slim'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        npm ci
+        npm test
+    id: 'test'
+    waitFor: ['-']
+
+  # Step 2: Build Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/smart-aac-api:$COMMIT_SHA'
+      - '-t'
+      - 'gcr.io/$PROJECT_ID/smart-aac-api:latest'
+      - '.'
+    id: 'build-image'
+    waitFor: ['test']
+
+  # Step 3: Push Docker image to Container Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/smart-aac-api:$COMMIT_SHA'
+    id: 'push-image-sha'
+    waitFor: ['build-image']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - 'gcr.io/$PROJECT_ID/smart-aac-api:latest'
+    id: 'push-image-latest'
+    waitFor: ['build-image']
+
+  # Step 4: Deploy to Cloud Run
+  - name: 'gcr.io/cloud-builders/gcloud'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Replace PROJECT_ID placeholder in service configuration
+        sed "s/PROJECT_ID/$PROJECT_ID/g" cloud-run-service.yaml > cloud-run-service-deploy.yaml
+        
+        # Update image tag to use the commit SHA
+        sed -i "s/:latest/:$COMMIT_SHA/g" cloud-run-service-deploy.yaml
+        
+        # Deploy the service
+        gcloud run services replace cloud-run-service-deploy.yaml \
+          --region=${_REGION} \
+          --project=$PROJECT_ID
+    id: 'deploy-cloud-run'
+    waitFor: ['push-image-sha', 'push-image-latest']
+
+  # Step 5: Run health check on deployed service
+  - name: 'gcr.io/cloud-builders/curl'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Get the service URL
+        SERVICE_URL=$(gcloud run services describe smart-aac-api \
+          --region=${_REGION} \
+          --project=$PROJECT_ID \
+          --format="value(status.url)")
+        
+        echo "Service URL: $SERVICE_URL"
+        
+        # Wait for service to be ready and test health endpoint
+        for i in {1..30}; do
+          if curl -f "$SERVICE_URL/health"; then
+            echo "Health check passed!"
+            exit 0
+          fi
+          echo "Waiting for service to be ready... (attempt $i/30)"
+          sleep 10
+        done
+        
+        echo "Health check failed after 5 minutes"
+        exit 1
+    id: 'health-check'
+    waitFor: ['deploy-cloud-run']
+
+# Substitution variables
+substitutions:
+  _REGION: 'us-central1'
+
+# Build options
+options:
+  # Use higher CPU for faster builds
+  machineType: 'E2_HIGHCPU_8'
+  
+  # Disk size for build
+  diskSizeGb: '100'
+  
+  # Logging options
+  logging: CLOUD_LOGGING_ONLY
+  
+  # Environment variables for build
+  env:
+    - 'NODE_ENV=production'
+
+# Build timeout (30 minutes)
+timeout: '1800s'
+
+# Images to be pushed to Container Registry
+images:
+  - 'gcr.io/$PROJECT_ID/smart-aac-api:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/smart-aac-api:latest'
+
+# Build tags for organization
+tags:
+  - 'smart-aac-api'
+  - 'cloud-run'
+  - 'nodejs'

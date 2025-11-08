@@ -1,0 +1,114 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: smart-aac-api
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/ingress-status: all
+spec:
+  template:
+    metadata:
+      annotations:
+        # Scaling configuration
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+        
+        # Resource allocation
+        run.googleapis.com/memory: "2Gi"
+        run.googleapis.com/cpu: "2"
+        
+        # Timeout configuration
+        run.googleapis.com/timeout: "300s"
+        
+        # Execution environment
+        run.googleapis.com/execution-environment: gen2
+        
+        # VPC connector (uncomment if using VPC)
+        # run.googleapis.com/vpc-access-connector: projects/PROJECT_ID/locations/REGION/connectors/CONNECTOR_NAME
+        
+    spec:
+      # Container concurrency (number of requests per container instance)
+      containerConcurrency: 100
+      
+      # Request timeout
+      timeoutSeconds: 300
+      
+      # Service account for Cloud Run service
+      serviceAccountName: smart-aac-api-sa@PROJECT_ID.iam.gserviceaccount.com
+      
+      containers:
+      - name: smart-aac-api
+        image: gcr.io/PROJECT_ID/smart-aac-api:latest
+        
+        ports:
+        - name: http1
+          containerPort: 8080
+        
+        env:
+        # Google Cloud Configuration
+        - name: GOOGLE_CLOUD_PROJECT
+          value: "PROJECT_ID"
+        
+        # Firebase Configuration
+        - name: FIREBASE_PROJECT_ID
+          value: "PROJECT_ID"
+        
+        # Vertex AI Configuration
+        - name: VERTEX_AI_LOCATION
+          value: "us-central1"
+        
+        # Cloud Storage Configuration
+        - name: STORAGE_BUCKET_NAME
+          value: "PROJECT_ID-aac-storage"
+        
+        # Server Configuration
+        - name: PORT
+          value: "8080"
+        - name: NODE_ENV
+          value: "production"
+        
+        # Logging Configuration
+        - name: LOG_LEVEL
+          value: "info"
+        
+        resources:
+          limits:
+            cpu: "2"
+            memory: "2Gi"
+          requests:
+            cpu: "1"
+            memory: "1Gi"
+        
+        # Startup probe to ensure container is ready
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 12
+        
+        # Liveness probe to restart unhealthy containers
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        
+        # Readiness probe to control traffic routing
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+  
+  traffic:
+  - percent: 100
+    latestRevision: true
