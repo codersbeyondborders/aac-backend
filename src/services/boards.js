@@ -158,7 +158,7 @@ class BoardsService {
       }
 
       // Check access permissions
-      if (userId && board.userId !== userId && !board.isPublic) {
+      if (!board.isPublic) {
         throw new Error('Access denied: Board is private and you are not the owner');
       }
 

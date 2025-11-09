@@ -49,6 +49,23 @@ class IconService {
         }
       );
       
+      // Handle audio storage if provided
+      let audioInfo = null;
+      if (metadata.audio && metadata.audio.audioData) {
+        try {
+          audioInfo = await this.storeAudio(userId, metadata.audio.audioData, metadata.audio.mimeType || 'audio/mpeg', {
+            label: metadata.label,
+            language: metadata.audio.language,
+            dialect: metadata.audio.dialect,
+            iconId: randomId
+          });
+          console.log(`✓ Audio stored successfully for icon`);
+        } catch (audioError) {
+          console.warn(`Failed to store audio for icon:`, audioError.message);
+          // Continue without audio if storage fails
+        }
+      }
+      
       // Prepare icon metadata for Firestore
       const iconMetadata = {
         userId: userId,
@@ -65,6 +82,11 @@ class IconService {
         analysisData: metadata.analysisData || null,
         culturalContext: metadata.culturalContext || null,
         tags: metadata.tags || [],
+        label: metadata.label || null,
+        category: metadata.category || null,
+        accent: metadata.accent || null,
+        color: metadata.color || null,
+        audio: audioInfo,
         isActive: true
       };
       
@@ -83,6 +105,7 @@ class IconService {
         mimeType: mimeType,
         size: uploadResult.size,
         createdAt: iconMetadata.createdAt,
+        audio: audioInfo,
         metadata: iconMetadata
       };
       
@@ -90,6 +113,82 @@ class IconService {
       console.error(`Failed to store icon for user ${userId}:`, error.message);
       throw new Error(`Icon storage failed: ${error.message}`);
     }
+  }
+
+  /**
+   * Store audio file for icon label
+   * @param {string} userId - User ID
+   * @param {string} base64AudioData - Base64 encoded audio data
+   * @param {string} mimeType - Audio MIME type
+   * @param {Object} metadata - Audio metadata
+   * @returns {Promise<Object>} Stored audio information
+   */
+  async storeAudio(userId, base64AudioData, mimeType, metadata = {}) {
+    try {
+      console.log(`Storing audio for user: ${userId}`);
+      
+      if (!userId || !base64AudioData) {
+        throw new Error('User ID and audio data are required');
+      }
+
+      // Convert base64 to buffer
+      const audioBuffer = Buffer.from(base64AudioData, 'base64');
+      
+      // Generate unique filename for the audio
+      const timestamp = Date.now();
+      const randomId = crypto.randomBytes(8).toString('hex');
+      const fileExtension = this.getAudioFileExtension(mimeType);
+      const filename = `audio/${userId}/${timestamp}-${randomId}${fileExtension}`;
+      
+      // Upload to Cloud Storage
+      const uploadResult = await this.storageService.uploadFile(
+        audioBuffer, 
+        filename, 
+        { 
+          contentType: mimeType,
+          userId: userId,
+          audioType: 'label-audio',
+          label: metadata.label,
+          language: metadata.language,
+          dialect: metadata.dialect,
+          iconId: metadata.iconId,
+          generatedAt: new Date().toISOString()
+        }
+      );
+      
+      console.log(`✓ Audio stored successfully: ${uploadResult.filename}`);
+      
+      return {
+        filename: uploadResult.filename,
+        publicUrl: uploadResult.publicUrl,
+        mimeType: mimeType,
+        size: uploadResult.size,
+        language: metadata.language,
+        dialect: metadata.dialect,
+        uploadedAt: uploadResult.uploadedAt
+      };
+      
+    } catch (error) {
+      console.error(`Failed to store audio for user ${userId}:`, error.message);
+      throw new Error(`Audio storage failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get audio file extension from MIME type
+   * @param {string} mimeType - MIME type
+   * @returns {string} File extension
+   */
+  getAudioFileExtension(mimeType) {
+    const mimeToExt = {
+      'audio/mpeg': '.mp3',
+      'audio/mp3': '.mp3',
+      'audio/wav': '.wav',
+      'audio/ogg': '.ogg',
+      'audio/webm': '.webm'
+    };
+    
+    return mimeToExt[mimeType] || '.mp3';
   }
 
   /**
@@ -146,7 +245,9 @@ class IconService {
         generationMethod: doc.generationMethod,
         prompt: doc.prompt,
         originalText: doc.originalText,
-        tags: doc.tags || []
+        tags: doc.tags || [],
+        label: doc.label || null,
+        audio: doc.audio || null
       }));
 
       console.log(`✓ Retrieved ${icons.length} icons for user: ${userId}`);
@@ -212,7 +313,12 @@ class IconService {
         originalImageInfo: iconDoc.originalImageInfo,
         analysisData: iconDoc.analysisData,
         culturalContext: iconDoc.culturalContext,
-        tags: iconDoc.tags || []
+        tags: iconDoc.tags || [],
+        label: iconDoc.label || null,
+        category: iconDoc.category || null,
+        accent: iconDoc.accent || null,
+        color: iconDoc.color || null,
+        audio: iconDoc.audio || null
       };
       
     } catch (error) {
@@ -330,7 +436,9 @@ class IconService {
         generationMethod: doc.generationMethod,
         prompt: doc.prompt,
         originalText: doc.originalText,
-        tags: doc.tags || []
+        tags: doc.tags || [],
+        label: doc.label || null,
+        audio: doc.audio || null
       }));
 
       console.log(`✓ Found ${icons.length} matching icons for query: "${searchQuery}"`);

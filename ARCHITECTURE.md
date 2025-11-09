@@ -4,7 +4,7 @@
 
 The Smart AAC (Augmentative and Alternative Communication) system is a production-ready, cloud-native application that leverages cutting-edge AI to help users create culturally-appropriate communication boards. Built on Google Cloud Platform with a modern serverless architecture, the system combines React frontend, Node.js backend, and advanced Vertex AI capabilities to deliver an accessible, scalable communication platform.
 
-**Status**: ✅ Production Ready | **Version**: 2.0 | **Last Updated**: November 2024
+**Status**: ✅ Production Ready | **Version**: 2.1 | **Last Updated**: November 2024
 
 ## System Architecture
 
@@ -119,9 +119,11 @@ graph TB
 - **Deployment**: Google Cloud Run (serverless)
 - **Monitoring**: Google Cloud Operations Suite
 
-### AI Models (Optimized)
+### AI Models & Services
 - **Text-to-Icon**: `imagen-4.0-fast-generate-001`
 - **Image Analysis**: `gemini-2.5-flash-image`
+- **Text-to-Speech**: Google Cloud Text-to-Speech
+- **Translation**: `gemini-2.5-pro` (when needed)
 
 ## Component Architecture
 
@@ -223,9 +225,10 @@ backend/
 - `PUT /api/v1/boards/{id}` - Update board
 - `DELETE /api/v1/boards/{id}` - Delete board
 
-**AI Icon Generation & Management (7)**
-- `POST /api/v1/icons/generate-from-text` - Generate from text
-- `POST /api/v1/icons/generate-from-image` - Generate from image
+**AI Icon & Audio Generation (8)**
+- `POST /api/v1/icons/generate-from-text` - Generate icon from text with optional audio
+- `POST /api/v1/icons/generate-from-image` - Generate/process icon from uploaded image
+- `POST /api/v1/icons/generate-audio-from-recording` - Upload and store recorded audio
 - `GET /api/v1/icons` - List user icons (paginated)
 - `GET /api/v1/icons/search` - Search icons
 - `GET /api/v1/icons/stats` - Get usage statistics
@@ -317,8 +320,8 @@ interface IconMetadata {
   filename: string;
   mimeType: string;
   size: number;              // bytes
-  iconType: 'generated' | 'uploaded' | 'custom';
-  generationMethod: 'text-to-icon' | 'image-to-icon';
+  iconType: 'generated' | 'uploaded' | 'uploaded-processed' | 'custom';
+  generationMethod: 'text-to-icon' | 'text-to-icon-sanitized' | 'image-to-icon-processed' | 'manual-upload';
   prompt?: string;
   originalText?: string;
   originalImageInfo?: {
@@ -330,10 +333,35 @@ interface IconMetadata {
     description: string;
     analysisType: string;
     confidence: string;
+    processed?: boolean;
   };
   culturalContext?: CulturalContext;
   tags: string[];
+  label?: string;
+  category?: string;
+  accent?: string;
+  color?: string;
+  audio?: AudioInfo;
+  translation?: TranslationInfo;
+  sanitized?: boolean;
   createdAt: Timestamp;
+}
+
+interface AudioInfo {
+  filename: string;
+  publicUrl: string;
+  mimeType: string;
+  size: number;
+  language: string;
+  dialect?: string;
+  uploadedAt: string;
+}
+
+interface TranslationInfo {
+  originalText: string;
+  translatedText: string;
+  targetLanguage: string;
+  targetDialect?: string;
 }
 ```
 
@@ -358,50 +386,77 @@ interface CulturalContext {
 ### Cloud Storage Structure
 ```
 gs://bucket-name/
-└── icons/
+├── icons/
+│   └── {userId}/
+│       └── {timestamp}-{iconId}.png
+└── audio/
     └── {userId}/
-        └── {timestamp}-{iconId}.png
+        └── {timestamp}-{audioId}.mp3
 ```
 
 ## AI Integration Architecture
 
 ### Vertex AI Service
 
-#### Simplified Model Strategy
-The system uses a streamlined two-model approach for optimal performance:
+#### AI Services Architecture
+The system uses a streamlined multi-service approach for optimal performance:
 
 1. **Text-to-Icon Generation**: `imagen-4.0-fast-generate-001`
    - Fast generation (3-5 seconds)
    - High-quality AAC-optimized icons
    - Cultural context integration
    - Accessibility-focused prompts
+   - Automatic sanitization for transparent backgrounds
 
-2. **Image Analysis**: `gemini-2.5-flash-image`
+2. **Image Analysis & Processing**: `gemini-2.5-flash-image` + `imagen-4.0-fast-generate-001`
    - Advanced image understanding
-   - Key element extraction
-   - Cultural sensitivity
-   - Detailed descriptions for icon generation
+   - Automatic background removal
+   - Text and watermark removal
+   - Icon style optimization
+   - Two processing modes: full generation or cleanup only
 
-#### Icon Generation Pipeline
+3. **Text-to-Speech**: Google Cloud Text-to-Speech
+   - 50+ language support
+   - Regional dialect support
+   - High-quality voice synthesis
+   - MP3 audio output
+   - Cultural voice adaptation
+
+4. **Translation**: `gemini-2.5-pro`
+   - Automatic text translation
+   - Dialect-aware translation
+   - Used for audio generation in user's language
+
+#### Icon & Audio Generation Pipeline
 
 ```mermaid
-graph LR
+graph TB
     INPUT[User Input] --> PROFILE[Get User Profile]
     PROFILE --> CULTURE[Extract Cultural Context]
-    CULTURE --> PROMPT[Construct AI Prompt]
     
     subgraph "Text-to-Icon Path"
+        CULTURE --> PROMPT[Construct AI Prompt]
         PROMPT --> IMAGEN[Imagen 4.0 Fast]
+        IMAGEN --> SANITIZE[Sanitize Icon]
+        SANITIZE --> ICON_STORE[Store Icon]
     end
     
     subgraph "Image-to-Icon Path"
-        UPLOAD[Image Upload] --> GEMINI[Gemini 2.5 Flash]
-        GEMINI --> DESC[Text Description]
-        DESC --> PROMPT
+        UPLOAD[Image Upload] --> PROCESS[Process Image]
+        PROCESS --> TRANSPARENT[Remove Background & Text]
+        TRANSPARENT --> ICON_STORE
     end
     
-    IMAGEN --> STORE[Store in Cloud Storage]
-    STORE --> META[Save Metadata]
+    subgraph "Audio Generation Path"
+        LABEL[Icon Label] --> TRANSLATE{Translation Needed?}
+        TRANSLATE -->|Yes| GEMINI_TRANS[Gemini Translation]
+        TRANSLATE -->|No| TTS[Text-to-Speech]
+        GEMINI_TRANS --> TTS
+        TTS --> AUDIO_STORE[Store Audio]
+    end
+    
+    ICON_STORE --> META[Save Metadata]
+    AUDIO_STORE --> META
     META --> RESPONSE[Return to User]
 ```
 

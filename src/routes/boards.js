@@ -95,8 +95,6 @@ router.post('/', isAuthenticated, validateRequestBody(validateBoardData), async 
  *     tags: [Boards]
  *     summary: List user's boards
  *     description: Retrieves all boards owned by the authenticated user with pagination support
- *     security:
- *       - BearerAuth: []
  *     parameters:
  *       - in: query
  *         name: page
@@ -148,12 +146,6 @@ router.post('/', isAuthenticated, validateRequestBody(validateBoardData), async 
  *                         $ref: '#/components/schemas/AACBoard'
  *       400:
  *         description: Invalid pagination parameters
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       401:
- *         description: Authentication required
  *         content:
  *           application/json:
  *             schema:
@@ -420,8 +412,6 @@ router.get('/public', async (req, res) => {
  *     tags: [Boards]
  *     summary: Get specific board
  *     description: Retrieves a specific board by ID. User must own the board or it must be public.
- *     security:
- *       - BearerAuth: []
  *     parameters:
  *       - in: path
  *         name: id
@@ -448,12 +438,6 @@ router.get('/public', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
- *       401:
- *         description: Authentication required
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       403:
  *         description: Access denied - board is private
  *         content:
@@ -473,7 +457,7 @@ router.get('/public', async (req, res) => {
  *             schema:
  *               $ref: '#/components/schemas/ErrorResponse'
  */
-router.get('/:id', isAuthenticated, async (req, res) => {
+router.get('/:id', async (req, res) => {
   try {
     const boardId = req.params.id;
     
@@ -484,10 +468,8 @@ router.get('/:id', isAuthenticated, async (req, res) => {
         timestamp: new Date().toISOString()
       });
     }
-    
-    console.log(`Retrieving board: ${boardId} for user: ${req.user.uid}`);
-    
-    const board = await boardsService.getBoard(boardId, req.user.uid);
+        
+    const board = await boardsService.getBoard(boardId);
     
     if (!board) {
       return res.status(404).json({

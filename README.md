@@ -2,25 +2,30 @@
 
 > **🎯 Status: ✅ FULLY OPERATIONAL & PRODUCTION READY**
 
-A complete augmentative and alternative communication (AAC) platform featuring AI-powered icon generation, cultural personalization, and comprehensive board management. Built with modern cloud-native architecture and enterprise-grade security.
+A complete augmentative and alternative communication (AAC) platform featuring AI-powered icon generation, audio synthesis, cultural personalization, and comprehensive board management. Built with modern cloud-native architecture and enterprise-grade security.
 
 ## 🚀 **Recent Major Updates**
 
-### ✅ **AI Model Optimization (Latest)**
+### ✅ **Audio Generation & Recording (Latest)**
+- **Text-to-Speech Integration**: Generate audio for icon labels in 50+ languages
+- **Audio Recording Upload**: Store and manage recorded audio files
+- **Multi-Language Support**: Automatic translation and audio generation
+- **Cultural Voice Adaptation**: Language-appropriate audio synthesis
+
+### ✅ **AI Model Optimization**
 - **Simplified to 2 High-Performance Models**:
   - `imagen-4.0-fast-generate-001` for Text-to-Icon generation
   - `gemini-2.5-flash-image` for Image-to-Icon analysis
-- **Removed Complex Fallback Logic** for faster, more predictable responses
+- **Automatic Icon Sanitization**: Transparent backgrounds and text removal
 - **Enhanced Cultural Context Integration** for personalized icon generation
 
-### ✅ **Storage Infrastructure Resolved**
+### ✅ **Storage Infrastructure**
 - **Cloud Storage Bucket** fully configured and operational
-- **Icon Storage & Retrieval** working seamlessly
-- **Eliminated Storage Warnings** from API responses
+- **Icon & Audio Storage** working seamlessly
 - **Automated Bucket Setup** with proper CORS and lifecycle policies
 
 ### ✅ **Complete API Documentation**
-- **23 Comprehensive Endpoints** with full Swagger documentation
+- **25 Comprehensive Endpoints** with full Swagger documentation
 - **Interactive API Testing** at `/api-docs`
 - **Postman Collection** with automated testing scripts
 - **Real-time Validation** and error feedback
@@ -59,10 +64,14 @@ Deploy:    Google Cloud Run (Serverless)
 
 ## 🎯 **Core Features**
 
-### **1. 🤖 AI-Powered Icon Generation**
+### **1. 🤖 AI-Powered Icon & Audio Generation**
 - **Text-to-Icon**: Generate culturally-appropriate icons from text descriptions
+- **Upload Icon**: Upload your own icons with automatic AI processing
 - **Image-to-Icon**: Analyze uploaded images and create simplified AAC icons
+- **Text-to-Speech**: Generate audio for icon labels in 50+ languages
+- **Audio Recording**: Upload and store recorded audio files
 - **Cultural Adaptation**: Personalized based on user's language, region, and preferences
+- **Automatic Sanitization**: Transparent backgrounds and text removal
 - **High-Quality Output**: Optimized for AAC communication needs
 
 ### **2. 📋 AAC Board Management**
@@ -96,21 +105,33 @@ Our AI system has been streamlined for maximum performance and reliability:
   - High-quality icon generation from text prompts
   - Cultural context integration
   - AAC-optimized output (simple, clear, accessible)
+  - Automatic transparent background and text removal
   - Fast generation times (~3-5 seconds)
 
-#### **Image-to-Icon Analysis**
-- **Model**: `gemini-2.5-flash-image`
+#### **Image-to-Icon Processing**
+- **Model**: `gemini-2.5-flash-image` (analysis) + `imagen-4.0-fast-generate-001` (processing)
 - **Capabilities**:
   - Advanced image analysis and understanding
-  - Key element extraction for icon simplification
-  - Cultural sensitivity in interpretation
-  - Detailed descriptions for icon generation
+  - Automatic background removal and transparency
+  - Text and watermark removal
+  - Icon style optimization for AAC
+  - Two modes: Full AI generation or processing only
+
+#### **Text-to-Speech Generation**
+- **Service**: Google Cloud Text-to-Speech
+- **Capabilities**:
+  - 50+ language support with regional dialects
+  - High-quality voice synthesis
+  - Automatic translation to user's primary language
+  - Cultural voice adaptation
+  - MP3 audio output
 
 #### **Cultural Intelligence**
-- **Language Adaptation**: Supports 50+ languages
-- **Regional Customization**: Adapts symbols for different cultures
+- **Language Adaptation**: Supports 50+ languages with dialects
+- **Regional Customization**: Adapts symbols and voices for different cultures
 - **Accessibility Focus**: Optimized for AAC communication needs
 - **Context Awareness**: Considers user demographics and preferences
+- **Audio Localization**: Language-appropriate voice synthesis
 
 ---
 
@@ -145,16 +166,19 @@ PUT    /api/v1/boards/{id}                    # Update board
 DELETE /api/v1/boards/{id}                    # Delete board
 ```
 
-### **🎨 AI Icon Generation & Management (7 endpoints)**
+### **🎨 AI Icon & Audio Generation (8 endpoints)**
 ```
-POST   /api/v1/icons/generate-from-text       # Generate from text prompt
-POST   /api/v1/icons/generate-from-image      # Generate from uploaded image
-GET    /api/v1/icons                          # List user icons (paginated)
-GET    /api/v1/icons/search                   # Search icons by query
-GET    /api/v1/icons/stats                    # Get usage statistics
-GET    /api/v1/icons/{id}                     # Get icon details
-DELETE /api/v1/icons/{id}                     # Delete icon
+POST   /api/v1/icons/generate-from-text            # Generate icon from text with optional audio
+POST   /api/v1/icons/generate-from-image           # Generate/process icon from uploaded image
+POST   /api/v1/icons/generate-audio-from-recording # Upload and store recorded audio
+GET    /api/v1/icons                               # List user icons (paginated)
+GET    /api/v1/icons/search                        # Search icons by query
+GET    /api/v1/icons/stats                         # Get usage statistics
+GET    /api/v1/icons/{id}                          # Get icon details
+DELETE /api/v1/icons/{id}                          # Delete icon
 ```
+
+**Total Endpoints**: 25 (2 health + 9 profile + 6 boards + 8 icons/audio)
 
 **📖 Interactive Documentation**: `http://localhost:8080/api-docs`
 

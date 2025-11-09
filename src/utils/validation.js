@@ -162,24 +162,93 @@ function validateIconGenerationRequest(requestData) {
     return { isValid: false, errors: ['Request data must be an object'] };
   }
   
-  if (!isValidString(requestData.text, 1, 200)) {
-    errors.push('Text description is required and must be 1-200 characters');
+  if (!isValidString(requestData.text, 1, 500)) {
+    errors.push('Text description is required and must be 1-500 characters');
   }
   
-  // Validate optional cultural context
+  // Validate optional label
+  if (requestData.label && !isValidString(requestData.label, 1, 100)) {
+    errors.push('Label must be 1-100 characters');
+  }
+  
+  // Validate optional category
+  if (requestData.category && !isValidString(requestData.category, 1, 50)) {
+    errors.push('Category must be 1-50 characters');
+  }
+  
+  // Validate optional accent
+  if (requestData.accent && !isValidString(requestData.accent, 1, 50)) {
+    errors.push('Accent must be 1-50 characters');
+  }
+  
+  // Validate optional color
+  if (requestData.color && !isValidString(requestData.color, 1, 50)) {
+    errors.push('Color must be 1-50 characters');
+  }
+  
+  // Validate optional generateAudio flag
+  if (requestData.generateAudio !== undefined && !isValidBoolean(requestData.generateAudio)) {
+    errors.push('generateAudio must be a boolean');
+  }
+  
+  // Validate optional cultural context with comprehensive structure
   if (requestData.culturalContext) {
     const context = requestData.culturalContext;
     if (typeof context !== 'object') {
       errors.push('Cultural context must be an object');
     } else {
-      if (context.language && !isValidString(context.language, 2, 10)) {
-        errors.push('Language must be 2-10 characters');
+      // Validate country
+      if (context.country && !isValidString(context.country, 2, 100)) {
+        errors.push('Country must be 2-100 characters');
       }
-      if (context.region && !isValidString(context.region, 2, 50)) {
-        errors.push('Region must be 2-50 characters');
+      
+      // Validate region
+      if (context.region && !isValidString(context.region, 2, 100)) {
+        errors.push('Region must be 2-100 characters');
       }
-      if (context.style && !isValidString(context.style, 2, 20)) {
-        errors.push('Style must be 2-20 characters');
+      
+      // Validate languages object
+      if (context.languages) {
+        if (typeof context.languages !== 'object') {
+          errors.push('Languages must be an object');
+        } else {
+          // Validate primary language
+          if (context.languages.primary) {
+            if (typeof context.languages.primary !== 'object') {
+              errors.push('Primary language must be an object');
+            } else {
+              if (context.languages.primary.language && !isValidString(context.languages.primary.language, 2, 50)) {
+                errors.push('Primary language must be 2-50 characters');
+              }
+              if (context.languages.primary.dialect && !isValidString(context.languages.primary.dialect, 2, 50)) {
+                errors.push('Primary dialect must be 2-50 characters');
+              }
+            }
+          }
+        }
+      }
+      
+      // Validate demographics object
+      if (context.demographics) {
+        if (typeof context.demographics !== 'object') {
+          errors.push('Demographics must be an object');
+        } else {
+          if (context.demographics.age !== undefined) {
+            const age = parseInt(context.demographics.age, 10);
+            if (isNaN(age) || age < 1 || age > 120) {
+              errors.push('Age must be a number between 1 and 120');
+            }
+          }
+          if (context.demographics.gender && !isValidString(context.demographics.gender, 1, 50)) {
+            errors.push('Gender must be 1-50 characters');
+          }
+          if (context.demographics.religion && !isValidString(context.demographics.religion, 1, 100)) {
+            errors.push('Religion must be 1-100 characters');
+          }
+          if (context.demographics.ethnicity && !isValidString(context.demographics.ethnicity, 1, 100)) {
+            errors.push('Ethnicity must be 1-100 characters');
+          }
+        }
       }
     }
   }
@@ -213,7 +282,12 @@ function validateIconGenerationRequest(requestData) {
     isValid: errors.length === 0,
     errors,
     sanitizedData: {
-      text: sanitizeString(requestData.text, 200),
+      text: sanitizeString(requestData.text, 500),
+      label: requestData.label ? sanitizeString(requestData.label, 100) : undefined,
+      category: requestData.category ? sanitizeString(requestData.category, 50) : undefined,
+      accent: requestData.accent ? sanitizeString(requestData.accent, 50) : undefined,
+      color: requestData.color ? sanitizeString(requestData.color, 50) : undefined,
+      generateAudio: requestData.generateAudio || false,
       culturalContext: requestData.culturalContext || {},
       constraints: requestData.constraints || {}
     }

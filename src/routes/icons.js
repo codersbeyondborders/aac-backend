@@ -1,7 +1,7 @@
 const express = require('express');
 const { isAuthenticated } = require('../middleware/auth');
 const { validateIconGenerationRequest } = require('../utils/validation');
-const { uploadSingle, validateFileMetadata } = require('../middleware/upload');
+const { uploadSingle, uploadAudio, validateFileMetadata } = require('../middleware/upload');
 const vertexAIService = require('../services/vertexai');
 const userProfileService = require('../services/userProfile');
 const iconService = require('../services/icons');
@@ -13,11 +13,18 @@ const router = express.Router();
  * /api/v1/icons/generate-from-text:
  *   post:
  *     tags: [Icons]
- *     summary: Generate icon from text
+ *     summary: Generate icon from text with optional audio
  *     description: |
  *       Generates a culturally-appropriate icon from a text description using AI.
  *       The system retrieves the user's cultural preferences and creates optimized prompts
- *       for accessible icon generation.
+ *       for accessible icon generation. 
+ *       
+ *       **Processing Pipeline:**
+ *       1. Generate icon from text using Imagen
+ *       2. Apply final sanitization to ensure transparent background and remove any text
+ *       3. Store clean, optimized icon
+ *       
+ *       Optionally generates audio for the label in the user's primary language and dialect.
  *     security:
  *       - BearerAuth: []
  *     requestBody:
@@ -28,6 +35,8 @@ const router = express.Router();
  *             $ref: '#/components/schemas/GenerateIconRequest'
  *           example:
  *             text: "happy cat"
+ *             label: "Happy Cat"
+ *             generateAudio: true
  *     responses:
  *       200:
  *         description: Icon generated successfully
@@ -80,31 +89,43 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
       });
     }
     
-    const { text } = req.body;
+    const { text, label, category, accent, color, culturalContext: providedCulturalContext, generateAudio } = req.body;
     const userId = req.user.uid;
     
     console.log(`Generating icon for text: "${text}" (user: ${userId})`);
+    if (label) console.log(`Label: "${label}"`);
+    if (category) console.log(`Category: "${category}"`);
+    if (accent) console.log(`Accent: "${accent}"`);
+    if (color) console.log(`Color: "${color}"`);
+    if (generateAudio) console.log(`Audio generation requested: ${generateAudio}`);
     
-    // Step 1: Retrieve user's cultural context
+    // Step 1: Determine cultural context
+    // Priority: provided culturalContext > user profile > default
     let culturalContext;
-    try {
-      culturalContext = await userProfileService.getCulturalContext(userId);
-      console.log(`✓ Retrieved cultural context for user: ${userId}`);
-    } catch (error) {
-      console.error(`Failed to retrieve cultural context for user ${userId}:`, error.message);
-      // Continue with default context to ensure service availability
-      culturalContext = {
-        language: 'en',
-        region: 'US',
-        symbolStyle: 'simple',
-        culturalAdaptation: false
-      };
-      console.log('Using default cultural context due to retrieval error');
+    
+    if (providedCulturalContext && Object.keys(providedCulturalContext).length > 0) {
+      // Use provided cultural context from request
+      console.log('Using cultural context from request payload');
+      culturalContext = providedCulturalContext;
+    } else {
+      // Retrieve user's cultural context from profile
+      try {
+        culturalContext = await userProfileService.getCulturalContext(userId);
+        console.log(`✓ Retrieved cultural context for user: ${userId}`);
+      } catch (error) {
+        console.error(`Failed to retrieve cultural context for user ${userId}:`, error.message);
+        // Continue with default context to ensure service availability
+        culturalContext = {
+          language: 'en',
+          region: 'US',
+          symbolStyle: 'simple',
+          culturalAdaptation: false
+        };
+        console.log('Using default cultural context due to retrieval error');
+      }
     }
     
     // Step 2: Generate icon using Vertex AI with cultural context
-    // Note: Quality parameter removed - using single optimized model
-    
     try {
       const iconResult = await vertexAIService.generateIconFromText(text, culturalContext);
       
@@ -114,41 +135,148 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
       
       console.log(`✓ Icon generated successfully for text: "${text}" (user: ${userId})`);
       
-      // Step 3: Store the generated icon
+      // Step 2b: Apply final sanitization to ensure transparent background and no text
+      let finalIconData = iconResult.imageData;
+      let finalMimeType = iconResult.mimeType;
+      let sanitized = false;
+      
       try {
+        console.log('Applying final sanitization to generated icon...');
+        const imageBuffer = Buffer.from(iconResult.imageData, 'base64');
+        const sanitizedResult = await vertexAIService.processImageToTransparentIcon(imageBuffer, label || text);
+        
+        if (sanitizedResult.success && sanitizedResult.imageData) {
+          finalIconData = sanitizedResult.imageData;
+          finalMimeType = sanitizedResult.mimeType;
+          sanitized = true;
+          console.log('✓ Icon sanitized successfully');
+        } else {
+          console.log('⚠️ Sanitization returned no data, using original');
+        }
+      } catch (sanitizeError) {
+        console.warn(`Icon sanitization failed, using original: ${sanitizeError.message}`);
+      }
+      
+      // Step 3: Generate audio for label if requested
+      let audioData = null;
+      let translationResult = null;
+      
+      if (generateAudio && label) {
+        try {
+          console.log(`Generating audio for label: "${label}"`);
+          
+          // Get primary language and dialect from cultural context
+          const primaryLanguage = culturalContext.language || 'en';
+          const primaryDialect = culturalContext.dialect || null;
+          
+          // Step 3a: Translate label to primary language
+          if (primaryLanguage !== 'en' || primaryDialect) {
+            console.log(`Translating label to ${primaryLanguage}${primaryDialect ? ` (${primaryDialect})` : ''}`);
+            translationResult = await vertexAIService.translateText(label, primaryLanguage, primaryDialect);
+            console.log(`✓ Label translated: "${translationResult.translatedText}"`);
+          }
+          
+          // Step 3b: Generate audio from translated (or original) text
+          const textForAudio = translationResult ? translationResult.translatedText : label;
+          const audioResult = await vertexAIService.generateAudioFromText(textForAudio, primaryLanguage, primaryDialect, accent);
+          
+          if (audioResult.success && audioResult.audioData) {
+            audioData = {
+              audioData: audioResult.audioData,
+              mimeType: audioResult.mimeType,
+              language: primaryLanguage,
+              dialect: primaryDialect,
+              speaker: audioResult.speaker
+            };
+            console.log(`✓ Audio generated successfully for label with speaker: ${audioResult.speaker}`);
+          } else {
+            console.log(`⚠️ Audio generation attempted but data not available yet`);
+          }
+          
+        } catch (audioError) {
+          console.warn(`Failed to generate audio for label:`, audioError.message);
+          // Continue without audio if generation fails
+        }
+      }
+      
+      // Step 4: Store the generated icon
+      try {
+        const metadata = {
+          iconType: 'generated',
+          generationMethod: sanitized ? 'text-to-icon-sanitized' : 'text-to-icon',
+          prompt: iconResult.prompt,
+          originalText: text,
+          culturalContext: culturalContext,
+          tags: [text.toLowerCase().replace(/\s+/g, '_')],
+          sanitized: sanitized
+        };
+        
+        // Add optional fields to metadata
+        if (label) metadata.label = label;
+        if (category) metadata.category = category;
+        if (accent) metadata.accent = accent;
+        if (color) metadata.color = color;
+        
+        // Add audio data if available
+        if (audioData) {
+          metadata.audio = audioData;
+        }
+        
+        // Add translation info if available
+        if (translationResult) {
+          metadata.translation = {
+            originalText: translationResult.originalText,
+            translatedText: translationResult.translatedText,
+            targetLanguage: translationResult.targetLanguage,
+            targetDialect: translationResult.targetDialect
+          };
+        }
+        
         const storedIcon = await iconService.storeIcon(
           userId,
-          iconResult.imageData,
-          iconResult.mimeType,
-          {
-            iconType: 'generated',
-            generationMethod: 'text-to-icon',
-            prompt: iconResult.prompt,
-            originalText: text,
-            culturalContext: culturalContext,
-            tags: [text.toLowerCase().replace(/\s+/g, '_')]
-          }
+          finalIconData,
+          finalMimeType,
+          metadata
         );
         
         console.log(`✓ Icon stored successfully: ${storedIcon.id}`);
         
         // Return successful response with stored icon URL
+        const responseData = {
+          id: storedIcon.id,
+          publicUrl: storedIcon.publicUrl,
+          mimeType: storedIcon.mimeType,
+          size: storedIcon.size,
+          prompt: iconResult.prompt,
+          text: text,
+          createdAt: storedIcon.createdAt,
+          cultureProfile: culturalContext
+        };
+        
+        // Add optional fields to response
+        if (label) responseData.label = label;
+        if (category) responseData.category = category;
+        if (accent) responseData.accent = accent;
+        if (color) responseData.color = color;
+        
+        // Add audio information if available
+        if (storedIcon.audio) {
+          responseData.audio = storedIcon.audio;
+        }
+        
+        // Add translation information if available
+        if (translationResult) {
+          responseData.translation = {
+            originalText: translationResult.originalText,
+            translatedText: translationResult.translatedText,
+            targetLanguage: translationResult.targetLanguage,
+            targetDialect: translationResult.targetDialect
+          };
+        }
+        
         return res.status(200).json({
           success: true,
-          data: {
-            id: storedIcon.id,
-            publicUrl: storedIcon.publicUrl,
-            mimeType: storedIcon.mimeType,
-            size: storedIcon.size,
-            prompt: iconResult.prompt,
-            text: text,
-            createdAt: storedIcon.createdAt,
-            cultureProfile: {
-              language: culturalContext.language || 'en',
-              region: culturalContext.region || 'US',
-              symbolStyle: culturalContext.symbolStyle || 'simple'
-            }
-          },
+          data: responseData,
           timestamp: new Date().toISOString()
         });
         
@@ -157,20 +285,24 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
         
         // Return the generated icon as base64 if storage fails
         console.log('Falling back to base64 response due to storage error');
+        const responseData = {
+          imageData: iconResult.imageData,
+          mimeType: iconResult.mimeType,
+          prompt: iconResult.prompt,
+          text: text,
+          cultureProfile: culturalContext,
+          storageWarning: 'Icon generated but not stored due to storage service error'
+        };
+        
+        // Add optional fields to response
+        if (label) responseData.label = label;
+        if (category) responseData.category = category;
+        if (accent) responseData.accent = accent;
+        if (color) responseData.color = color;
+        
         return res.status(200).json({
           success: true,
-          data: {
-            imageData: iconResult.imageData,
-            mimeType: iconResult.mimeType,
-            prompt: iconResult.prompt,
-            text: text,
-            cultureProfile: {
-              language: culturalContext.language || 'en',
-              region: culturalContext.region || 'US',
-              symbolStyle: culturalContext.symbolStyle || 'simple'
-            },
-            storageWarning: 'Icon generated but not stored due to storage service error'
-          },
+          data: responseData,
           timestamp: new Date().toISOString()
         });
       }
@@ -202,14 +334,21 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
  * /api/v1/icons/generate-from-image:
  *   post:
  *     tags: [Icons]
- *     summary: Generate icon from uploaded image
+ *     summary: Upload icon image (with AI processing)
  *     description: |
- *       Analyzes an uploaded image using AI vision and generates a simplified, 
- *       culturally-appropriate icon based on the analysis. The process involves:
- *       1. Image analysis using Gemini Vision
- *       2. Text description generation
- *       3. Cultural context application
- *       4. Simplified icon generation using Imagen
+ *       Upload an icon image with automatic AI processing to create clean, transparent icons:
+ *       
+ *       **All uploaded images are processed through Gemini Vision to:**
+ *       - Remove backgrounds and create transparent PNG
+ *       - Remove any text labels or watermarks
+ *       - Optimize for AAC communication (simple, high-contrast)
+ *       - Ensure consistent icon style
+ *       
+ *       **Two modes:**
+ *       1. **Upload + Full AI Generation** (generateIcon=true): Analyze image and regenerate as new icon
+ *       2. **Upload + Processing** (generateIcon=false): Clean up uploaded image while preserving original style
+ *       
+ *       The generateIcon parameter controls the level of AI transformation applied.
  *     security:
  *       - BearerAuth: []
  *     requestBody:
@@ -222,7 +361,21 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
  *               image:
  *                 type: string
  *                 format: binary
- *                 description: Image file to analyze and convert to icon
+ *                 description: Image file to upload
+ *               generateIcon:
+ *                 type: boolean
+ *                 description: Whether to generate a new icon using AI (default true)
+ *                 default: true
+ *               label:
+ *                 type: string
+ *                 description: Optional label for the icon
+ *               category:
+ *                 type: string
+ *                 description: Optional category
+ *               generateAudio:
+ *                 type: boolean
+ *                 description: Generate audio for label (requires label field)
+ *                 default: false
  *             required:
  *               - image
  *           encoding:
@@ -230,69 +383,39 @@ router.post('/generate-from-text', isAuthenticated, async (req, res) => {
  *               contentType: image/jpeg, image/png, image/gif, image/webp
  *     responses:
  *       200:
- *         description: Icon generated successfully from image
+ *         description: Icon uploaded/generated successfully
  *         content:
  *           application/json:
  *             schema:
- *               allOf:
- *                 - $ref: '#/components/schemas/GeneratedIconResponse'
- *                 - type: object
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
  *                   properties:
- *                     data:
+ *                     id:
+ *                       type: string
+ *                     publicUrl:
+ *                       type: string
+ *                     mimeType:
+ *                       type: string
+ *                     size:
+ *                       type: number
+ *                     iconType:
+ *                       type: string
+ *                       enum: [uploaded, generated]
+ *                     generatedByAI:
+ *                       type: boolean
+ *                     analysis:
  *                       type: object
- *                       properties:
- *                         originalImage:
- *                           type: object
- *                           properties:
- *                             filename:
- *                               type: string
- *                             size:
- *                               type: number
- *                             mimetype:
- *                               type: string
- *                         analysis:
- *                           type: object
- *                           properties:
- *                             description:
- *                               type: string
- *                               description: AI-generated description of the image
- *                             analysisType:
- *                               type: string
- *                             confidence:
- *                               type: number
+ *                       description: Only present if generateIcon was true
  *       400:
  *         description: Invalid image file or request
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *             example:
- *               error: "No valid image file provided"
- *               code: "NO_IMAGE_FILE"
- *               details: "Please upload an image file in the 'image' field"
- *               timestamp: "2024-01-01T12:00:00.000Z"
  *       401:
  *         description: Authentication required
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *       413:
- *         description: File too large
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
  *       500:
- *         description: Image analysis or icon generation failed
- *         content:
- *           application/json:
- *             schema:
- *               $ref: '#/components/schemas/ErrorResponse'
- *             example:
- *               error: "Image analysis service unavailable"
- *               code: "IMAGE_ANALYSIS_ERROR"
- *               timestamp: "2024-01-01T12:00:00.000Z"
+ *         description: Upload or processing failed
  */
 router.post('/generate-from-image', 
   isAuthenticated, 
@@ -300,10 +423,11 @@ router.post('/generate-from-image',
   validateFileMetadata, 
   async (req, res) => {
     try {
-      console.log(`Image-to-icon generation request from user: ${req.user.uid}`);
+      console.log(`Image upload request from user: ${req.user.uid}`);
       
       const userId = req.user.uid;
       const uploadedFile = req.file;
+      const { generateIcon, label, category, accent, color, generateAudio } = req.body;
       
       if (!uploadedFile || !uploadedFile.buffer) {
         console.error('No valid image file provided in request');
@@ -315,16 +439,19 @@ router.post('/generate-from-image',
         });
       }
       
-      console.log(`Processing uploaded image: ${uploadedFile.originalname} (${uploadedFile.size} bytes) for user: ${userId}`);
+      // Default to true for backward compatibility
+      const shouldGenerateIcon = generateIcon === undefined || generateIcon === 'true' || generateIcon === true;
       
-      // Step 1: Retrieve user's cultural context
+      console.log(`Processing uploaded image: ${uploadedFile.originalname} (${uploadedFile.size} bytes) for user: ${userId}`);
+      console.log(`Generate icon with AI: ${shouldGenerateIcon}`);
+      
+      // Retrieve user's cultural context
       let culturalContext;
       try {
         culturalContext = await userProfileService.getCulturalContext(userId);
         console.log(`✓ Retrieved cultural context for user: ${userId}`);
       } catch (error) {
         console.error(`Failed to retrieve cultural context for user ${userId}:`, error.message);
-        // Continue with default context to ensure service availability
         culturalContext = {
           language: 'en',
           region: 'US',
@@ -334,155 +461,393 @@ router.post('/generate-from-image',
         console.log('Using default cultural context due to retrieval error');
       }
       
-      // Step 2: Analyze uploaded image using Gemini Vision
-      let imageAnalysis;
-      try {
-        console.log('Analyzing uploaded image with Gemini Vision...');
-        imageAnalysis = await vertexAIService.analyzeImage(uploadedFile.buffer, 'icon_elements');
-        
-        if (!imageAnalysis.success || !imageAnalysis.description) {
-          throw new Error('Image analysis failed - no description generated');
-        }
-        
-        console.log(`✓ Image analysis completed: "${imageAnalysis.description}"`);
-        
-      } catch (analysisError) {
-        console.error(`Image analysis failed for user ${userId}:`, analysisError.message);
-        
-        return res.status(500).json({
-          error: 'Image analysis service unavailable',
-          code: 'IMAGE_ANALYSIS_ERROR',
-          details: analysisError.message,
-          timestamp: new Date().toISOString()
-        });
-      }
+      let finalImageData;
+      let finalMimeType;
+      let iconType;
+      let generationMethod;
+      let analysisData = null;
+      let prompt = null;
       
-      // Step 3: Generate icon from analysis description using Imagen
-      // Note: Quality parameter removed - using single optimized model
-      
-      try {
-        console.log(`Generating icon from analysis: "${imageAnalysis.description}"`);
+      if (shouldGenerateIcon) {
+        // Mode 1: AI Generation - Analyze and generate new icon with transparent background
+        console.log('Generating new icon from uploaded image using AI...');
         
-        const iconResult = await vertexAIService.generateIconFromText(
-          imageAnalysis.description, 
-          culturalContext
-        );
-        
-        if (!iconResult.success) {
-          throw new Error('Icon generation failed - no result returned');
-        }
-        
-        console.log(`✓ Icon generated successfully from image analysis (user: ${userId})`);
-        
-        // Step 4: Store the generated icon
         try {
-          const storedIcon = await iconService.storeIcon(
-            userId,
-            iconResult.imageData,
-            iconResult.mimeType,
-            {
-              iconType: 'generated',
-              generationMethod: 'image-to-icon',
-              prompt: iconResult.prompt,
-              originalText: imageAnalysis.description,
-              originalImageInfo: {
-                filename: uploadedFile.originalname,
-                size: uploadedFile.size,
-                mimetype: uploadedFile.mimetype
-              },
-              analysisData: {
-                description: imageAnalysis.description,
-                analysisType: imageAnalysis.analysisType,
-                confidence: imageAnalysis.confidence
-              },
-              culturalContext: culturalContext,
-              tags: [imageAnalysis.description.toLowerCase().replace(/\s+/g, '_').substring(0, 50)]
-            }
+          // Process image to create clean transparent icon
+          console.log('Processing uploaded image to create transparent icon...');
+          const iconResult = await vertexAIService.processImageToTransparentIcon(
+            uploadedFile.buffer,
+            label // Use label as hint for what the icon should represent
           );
           
-          console.log(`✓ Icon stored successfully: ${storedIcon.id}`);
+          if (!iconResult.success || !iconResult.imageData) {
+            throw new Error('Icon processing failed - no result returned');
+          }
           
-          // Return successful response with stored icon URL and complete pipeline results
-          return res.status(200).json({
-            success: true,
-            data: {
-              id: storedIcon.id,
-              publicUrl: storedIcon.publicUrl,
-              mimeType: storedIcon.mimeType,
-              size: storedIcon.size,
-              prompt: iconResult.prompt,
-              createdAt: storedIcon.createdAt,
-              originalImage: {
-                filename: uploadedFile.originalname,
-                size: uploadedFile.size,
-                mimetype: uploadedFile.mimetype
-              },
-              analysis: {
-                description: imageAnalysis.description,
-                analysisType: imageAnalysis.analysisType,
-                confidence: imageAnalysis.confidence
-              },
-              cultureProfile: {
-                language: culturalContext.language || 'en',
-                region: culturalContext.region || 'US',
-                symbolStyle: culturalContext.symbolStyle || 'simple'
-              }
-            },
-            timestamp: new Date().toISOString()
-          });
+          console.log(`✓ Icon processed successfully with transparent background (user: ${userId})`);
           
-        } catch (storageError) {
-          console.error(`Failed to store icon for user ${userId}:`, storageError.message);
+          analysisData = {
+            description: iconResult.originalDescription,
+            analysisType: 'icon_elements',
+            confidence: 'high',
+            processed: true
+          };
           
-          // Return the generated icon as base64 if storage fails
-          console.log('Falling back to base64 response due to storage error');
-          return res.status(200).json({
-            success: true,
-            data: {
-              imageData: iconResult.imageData,
-              mimeType: iconResult.mimeType,
-              prompt: iconResult.prompt,
-              originalImage: {
-                filename: uploadedFile.originalname,
-                size: uploadedFile.size,
-                mimetype: uploadedFile.mimetype
-              },
-              analysis: {
-                description: imageAnalysis.description,
-                analysisType: imageAnalysis.analysisType,
-                confidence: imageAnalysis.confidence
-              },
-              cultureProfile: {
-                language: culturalContext.language || 'en',
-                region: culturalContext.region || 'US',
-                symbolStyle: culturalContext.symbolStyle || 'simple'
-              },
-              storageWarning: 'Icon generated but not stored due to storage service error'
-            },
+          finalImageData = iconResult.imageData;
+          finalMimeType = iconResult.mimeType;
+          iconType = 'generated';
+          generationMethod = 'image-to-icon-processed';
+          prompt = iconResult.prompt;
+          
+        } catch (aiError) {
+          console.error(`AI processing failed: ${aiError.message}`);
+          return res.status(500).json({
+            error: 'Icon processing service unavailable',
+            code: 'ICON_PROCESSING_ERROR',
+            details: aiError.message,
             timestamp: new Date().toISOString()
           });
         }
         
-      } catch (iconError) {
-        console.error(`Icon generation failed for user ${userId}:`, iconError.message);
+      } else {
+        // Mode 2: Direct Upload - Process to ensure transparent background and no text
+        console.log('Processing uploaded icon to ensure clean transparent background...');
+        
+        try {
+          // Even for manual uploads, process to remove background and text
+          const iconResult = await vertexAIService.processImageToTransparentIcon(
+            uploadedFile.buffer,
+            label
+          );
+          
+          if (iconResult.success && iconResult.imageData) {
+            console.log('✓ Manual upload processed to transparent icon');
+            finalImageData = iconResult.imageData;
+            finalMimeType = iconResult.mimeType;
+            iconType = 'uploaded-processed';
+            generationMethod = 'manual-upload-processed';
+            
+            analysisData = {
+              description: iconResult.originalDescription,
+              processed: true
+            };
+          } else {
+            // Fallback to original if processing fails
+            console.log('⚠️ Processing failed, using original upload');
+            finalImageData = uploadedFile.buffer.toString('base64');
+            finalMimeType = uploadedFile.mimetype;
+            iconType = 'uploaded';
+            generationMethod = 'manual-upload';
+          }
+        } catch (processError) {
+          // If processing fails, use original image
+          console.warn(`Image processing failed, using original: ${processError.message}`);
+          finalImageData = uploadedFile.buffer.toString('base64');
+          finalMimeType = uploadedFile.mimetype;
+          iconType = 'uploaded';
+          generationMethod = 'manual-upload';
+        }
+      }
+      
+      // Generate audio if requested
+      let audioData = null;
+      let translationResult = null;
+      
+      if (generateAudio && label) {
+        try {
+          console.log(`Generating audio for label: "${label}"`);
+          
+          const primaryLanguage = culturalContext.language || 'en';
+          const primaryDialect = culturalContext.dialect || null;
+          
+          // Translate label if needed
+          if (primaryLanguage !== 'en' || primaryDialect) {
+            console.log(`Translating label to ${primaryLanguage}${primaryDialect ? ` (${primaryDialect})` : ''}`);
+            translationResult = await vertexAIService.translateText(label, primaryLanguage, primaryDialect);
+            console.log(`✓ Label translated: "${translationResult.translatedText}"`);
+          }
+          
+          // Generate audio
+          const textForAudio = translationResult ? translationResult.translatedText : label;
+          const audioResult = await vertexAIService.generateAudioFromText(textForAudio, primaryLanguage, primaryDialect, accent);
+          
+          if (audioResult.success && audioResult.audioData) {
+            audioData = {
+              audioData: audioResult.audioData,
+              mimeType: audioResult.mimeType,
+              language: primaryLanguage,
+              dialect: primaryDialect,
+              speaker: audioResult.speaker
+            };
+            console.log(`✓ Audio generated successfully for label with speaker: ${audioResult.speaker}`);
+          }
+          
+        } catch (audioError) {
+          console.warn(`Failed to generate audio for label:`, audioError.message);
+        }
+      }
+      
+      // Store the icon
+      try {
+        const metadata = {
+          iconType: iconType,
+          generationMethod: generationMethod,
+          originalImageInfo: {
+            filename: uploadedFile.originalname,
+            size: uploadedFile.size,
+            mimetype: uploadedFile.mimetype
+          },
+          culturalContext: culturalContext
+        };
+        
+        if (prompt) metadata.prompt = prompt;
+        if (analysisData) {
+          metadata.analysisData = analysisData;
+          metadata.originalText = analysisData.description;
+        }
+        if (label) metadata.label = label;
+        if (category) metadata.category = category;
+        if (accent) metadata.accent = accent;
+        if (color) metadata.color = color;
+        if (audioData) metadata.audio = audioData;
+        if (translationResult) {
+          metadata.translation = {
+            originalText: translationResult.originalText,
+            translatedText: translationResult.translatedText,
+            targetLanguage: translationResult.targetLanguage,
+            targetDialect: translationResult.targetDialect
+          };
+        }
+        
+        const storedIcon = await iconService.storeIcon(
+          userId,
+          finalImageData,
+          finalMimeType,
+          metadata
+        );
+        
+        console.log(`✓ Icon stored successfully: ${storedIcon.id}`);
+        
+        // Build response
+        const responseData = {
+          id: storedIcon.id,
+          publicUrl: storedIcon.publicUrl,
+          mimeType: storedIcon.mimeType,
+          size: storedIcon.size,
+          iconType: iconType,
+          generatedByAI: shouldGenerateIcon,
+          createdAt: storedIcon.createdAt,
+          originalImage: {
+            filename: uploadedFile.originalname,
+            size: uploadedFile.size,
+            mimetype: uploadedFile.mimetype
+          }
+        };
+        
+        if (label) responseData.label = label;
+        if (category) responseData.category = category;
+        if (prompt) responseData.prompt = prompt;
+        if (analysisData) responseData.analysis = analysisData;
+        if (storedIcon.audio) responseData.audio = storedIcon.audio;
+        if (translationResult) responseData.translation = translationResult;
+        if (shouldGenerateIcon) {
+          responseData.cultureProfile = {
+            language: culturalContext.language || 'en',
+            region: culturalContext.region || 'US',
+            symbolStyle: culturalContext.symbolStyle || 'simple'
+          };
+        }
+        
+        return res.status(200).json({
+          success: true,
+          data: responseData,
+          timestamp: new Date().toISOString()
+        });
+        
+      } catch (storageError) {
+        console.error(`Failed to store icon for user ${userId}:`, storageError.message);
         
         return res.status(500).json({
-          error: 'Icon generation service unavailable',
-          code: 'ICON_GENERATION_ERROR',
-          details: iconError.message,
-          analysis: imageAnalysis ? {
-            description: imageAnalysis.description,
-            confidence: imageAnalysis.confidence
-          } : null,
+          error: 'Icon storage failed',
+          code: 'STORAGE_ERROR',
+          details: storageError.message,
           timestamp: new Date().toISOString()
         });
       }
       
     } catch (error) {
-      console.error('Unexpected error in image-to-icon generation:', error);
+      console.error('Unexpected error in image upload/generation:', error);
       
       return res.status(500).json({
-        error: 'Internal server error during image-to-icon generation',
+        error: 'Internal server error during image processing',
+        code: 'INTERNAL_ERROR',
+        timestamp: new Date().toISOString()
+      });
+    }
+  }
+);
+
+/**
+ * @swagger
+ * /api/v1/icons/generate-audio-from-recording:
+ *   post:
+ *     tags: [Icons]
+ *     summary: Upload and store recorded audio for icon
+ *     description: |
+ *       Uploads and stores recorded audio file for an icon. The original audio is stored
+ *       as-is without any processing or transcription. Optionally link the audio to an
+ *       existing icon by providing the iconId.
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               audio:
+ *                 type: string
+ *                 format: binary
+ *                 description: Audio file to upload (webm, mp3, wav, ogg, m4a)
+ *               iconId:
+ *                 type: string
+ *                 description: Optional icon ID to associate audio with
+ *               label:
+ *                 type: string
+ *                 description: Optional label/description for the audio
+ *             required:
+ *               - audio
+ *           encoding:
+ *             audio:
+ *               contentType: audio/webm, audio/mpeg, audio/mp3, audio/wav, audio/ogg
+ *     responses:
+ *       200:
+ *         description: Audio uploaded and stored successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 audio:
+ *                   type: object
+ *                   properties:
+ *                     filename:
+ *                       type: string
+ *                     publicUrl:
+ *                       type: string
+ *                     mimeType:
+ *                       type: string
+ *                     size:
+ *                       type: number
+ *                     uploadedAt:
+ *                       type: string
+ *                       format: date-time
+ *                 iconId:
+ *                   type: string
+ *                   nullable: true
+ *                 originalFile:
+ *                   type: object
+ *                   properties:
+ *                     filename:
+ *                       type: string
+ *                     size:
+ *                       type: number
+ *                     mimetype:
+ *                       type: string
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: Invalid audio file or request
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Audio storage failed
+ */
+router.post('/generate-audio-from-recording',
+  isAuthenticated,
+  uploadAudio('audio'),
+  validateFileMetadata,
+  async (req, res) => {
+    try {
+      console.log(`Audio-to-audio generation request from user: ${req.user.uid}`);
+      
+      const userId = req.user.uid;
+      const uploadedFile = req.file;
+      const { iconId } = req.body;
+      
+      if (!uploadedFile || !uploadedFile.buffer) {
+        console.error('No valid audio file provided in request');
+        return res.status(400).json({
+          error: 'No valid audio file provided',
+          code: 'NO_AUDIO_FILE',
+          details: 'Please upload an audio file in the "audio" field',
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+      console.log(`Storing uploaded audio: ${uploadedFile.originalname} (${uploadedFile.size} bytes) for user: ${userId}`);
+      
+      // Get optional label from request
+      const { label } = req.body;
+      
+      // Step 1: Convert uploaded audio buffer to base64
+      const audioBase64 = uploadedFile.buffer.toString('base64');
+      
+      // Step 2: Store the original recorded audio
+      try {
+        const storedAudio = await iconService.storeAudio(
+          userId,
+          audioBase64,
+          uploadedFile.mimetype,
+          {
+            label: label || 'Recorded audio',
+            iconId: iconId || null,
+            originalFilename: uploadedFile.originalname,
+            recordedAt: new Date().toISOString()
+          }
+        );
+        
+        console.log(`✓ Audio stored successfully: ${storedAudio.filename}`);
+        
+        // Return successful response
+        return res.status(200).json({
+          success: true,
+          audio: {
+            filename: storedAudio.filename,
+            publicUrl: storedAudio.publicUrl,
+            mimeType: storedAudio.mimeType,
+            size: storedAudio.size,
+            uploadedAt: storedAudio.uploadedAt
+          },
+          iconId: iconId || null,
+          originalFile: {
+            filename: uploadedFile.originalname,
+            size: uploadedFile.size,
+            mimetype: uploadedFile.mimetype
+          },
+          timestamp: new Date().toISOString()
+        });
+        
+      } catch (storageError) {
+        console.error(`Failed to store audio for user ${userId}:`, storageError.message);
+        
+        return res.status(500).json({
+          error: 'Audio storage failed',
+          code: 'AUDIO_STORAGE_ERROR',
+          details: storageError.message,
+          timestamp: new Date().toISOString()
+        });
+      }
+      
+    } catch (error) {
+      console.error('Unexpected error in audio-to-audio generation:', error);
+      
+      return res.status(500).json({
+        error: 'Internal server error during audio processing',
         code: 'INTERNAL_ERROR',
         timestamp: new Date().toISOString()
       });

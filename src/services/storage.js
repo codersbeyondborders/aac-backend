@@ -148,7 +148,7 @@ class StorageService {
    * @param {string[]} allowedTypes - Array of allowed MIME types
    * @returns {boolean} Validation result
    */
-  validateFileType(contentType, allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']) {
+  validateFileType(contentType, allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/webm']) {
     if (!contentType) {
       return false;
     }
